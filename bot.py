@@ -2,18 +2,30 @@ import json
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 
-# Set console encoding to UTF-8 for Windows
+# Windows কনসোলের জন্য UTF-8 নিশ্চিত করা
 if sys.platform.startswith('win'):
     try:
         sys.stdout.reconfigure(encoding='utf-8')
         sys.stderr.reconfigure(encoding='utf-8')
     except Exception:
         pass
+
+# বাংলাদেশ টাইমজোন (UTC+6)
+BD_TZ = timezone(timedelta(hours=6))
+
+def get_bd_time():
+    """বাংলাদেশ সময় রিটার্ন করে"""
+    return datetime.now(BD_TZ)
+
+def get_bd_time_str(include_seconds=True):
+    """বাংলাদেশ সময়ের সুন্দর ফরম্যাট রিটার্ন করে"""
+    fmt = "%I:%M:%S %p" if include_seconds else "%I:%M %p"
+    return get_bd_time().strftime(fmt)
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
@@ -31,10 +43,10 @@ def load_config():
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 file_cfg = json.load(f)
                 default_config.update(file_cfg)
-        except Exception as e:
-            print(f"⚠️ config.json পড়তে সমস্যা হয়েছে: {e}")
+        except Exception:
+            pass
             
-    # Environment variables override file config (useful for Render deployment)
+    # Render বা সার্ভারের এনভায়রনমেন্ট ভেরিয়েবল
     if os.getenv("BOT_TOKEN"):
         default_config["BOT_TOKEN"] = os.getenv("BOT_TOKEN")
     if os.getenv("CHAT_ID"):
@@ -50,21 +62,20 @@ def load_config():
 
 config = load_config()
 
-# Global state
-current_link_state = None  # True for ON, False for OFF, None for Unknown
+# গ্লোবাল স্ট্যাটাস ভেরিয়েবল
+current_link_state = None  # True = চালু, False = বন্ধ
 last_check_time = None
-last_status_message = "শুরু হয়নি"
 
 def send_telegram_message(text: str):
     token = config.get("BOT_TOKEN", "").strip()
     chat_id = config.get("CHAT_ID", "").strip()
     
     if not token or token == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
-        print("❌ Telegram BOT_TOKEN কনফিগার করা হয়নি!")
+        print("❌ টেলিগ্রাম বট টোকেন দেওয়া হয়নি!")
         return False
         
     if not chat_id or chat_id == "YOUR_TELEGRAM_GROUP_CHAT_ID_HERE":
-        print("❌ Telegram CHAT_ID কনফিগার করা হয়নি!")
+        print("❌ টেলিগ্রাম চ্যাট আইডি দেওয়া হয়নি!")
         return False
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -79,25 +90,24 @@ def send_telegram_message(text: str):
         res = requests.post(url, json=payload, timeout=10)
         res_data = res.json()
         if res_data.get("ok"):
-            print(f"📨 [Telegram Sent] মেসেজ সফলভাবে গ্রুপে পাঠানো হয়েছে।")
+            print(f"[{get_bd_time_str()}] 📨 গ্রুপে মেসেজ পাঠানো হয়েছে।")
             return True
         else:
-            print(f"❌ [Telegram Error] {res_data.get('description')}")
+            print(f"[{get_bd_time_str()}] ❌ টেলিগ্রাম এরর: {res_data.get('description')}")
             return False
     except Exception as e:
-        print(f"❌ [Telegram Exception] মেসেজ পাঠাতে ব্যর্থ: {e}")
+        print(f"[{get_bd_time_str()}] ❌ মেসেজ পাঠাতে সমস্যা হয়েছে: {e}")
         return False
 
 def check_link_status():
     """
-    Checks if the link is ON or OFF.
-    Returns:
-        (is_online: bool, reason: str)
+    লিংক চালু নাকি বন্ধ তা পরীক্ষা করে।
+    রিটার্ন করে: True (চালু) অথবা False (বন্ধ)
     """
-    global last_check_time, last_status_message
-    last_check_time = datetime.now().strftime("%I:%M:%S %p")
+    global last_check_time
+    last_check_time = get_bd_time_str(include_seconds=True)
     
-    # 1. Primary check via API endpoint (/api/info)
+    # ১. বায়ার ব্যাকএন্ড এপিআই চেক
     api_url = config.get("API_URL", "http://skysysx.net/api/info")
     try:
         r = requests.get(api_url, timeout=8)
@@ -107,70 +117,56 @@ def check_link_status():
             is_api_offline = bool(data.get("api_offline_locked", False))
             webhook_fail = (data.get("webhook_status") == "fail")
             
-            is_locked = is_push_locked or is_api_offline or webhook_fail
-            
-            if is_locked:
-                reason_list = []
-                if is_api_offline:
-                    reason_list.append("Buyer API Offline")
-                if webhook_fail:
-                    reason_list.append("Webhook Fail")
-                if is_push_locked:
-                    reason_list.append("Push Locked")
-                reason = ", ".join(reason_list) if reason_list else "Locked"
-                last_status_message = f"OFF ({reason})"
-                return False, reason
+            # কোনো একটি লক থাকলে বা অফলাইন থাকলে বন্ধ
+            if is_push_locked or is_api_offline or webhook_fail:
+                return False
             else:
-                last_status_message = "ON (Active)"
-                return True, "Active"
-    except Exception as err:
+                return True
+    except Exception:
         pass
 
-    # 2. Fallback check via direct HTML fetch of target URL
+    # ২. সরাসরি পেজ থেকে বিকল্প চেক
     target_url = config.get("TARGET_URL", "http://skysysx.net/e/boss")
     try:
         r = requests.get(target_url, timeout=10)
         content = r.text
         if "Buyer API Offline" in content or "买家 API 已离线" in content or "Submissions are locked" in content:
-            last_status_message = "OFF (Buyer API Offline)"
-            return False, "Buyer API Offline"
+            return False
         elif "Input (one per line)" in content or "Endpoint: boss" in content:
-            last_status_message = "ON (Active)"
-            return True, "Active"
-    except Exception as e:
+            return True
+    except Exception:
         pass
 
-    return None, "Error connecting to server"
+    return None
 
-# --- Web Server for 24/7 Hosting (Render & UptimeRobot) ---
+# --- রেন্ডার ২৪/৭ সচল রাখার জন্য ওয়েব পেজ ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
-        status_text = "🟢 ON (সক্রিয়)" if current_link_state else "🔴 OFF (বন্ধ)"
+        status_text = "🟢 লিংক চালু আছে" if current_link_state else "🔴 লিংক বন্ধ আছে"
         html = f"""
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Telegram Link Monitor</title>
+            <meta charset="utf-8">
+            <title>লিংক মনিটর বট</title>
             <meta http-equiv="refresh" content="10">
             <style>
-                body {{ font-family: Arial, sans-serif; text-align: center; padding-top: 50px; background: #121820; color: #fff; }}
-                .card {{ background: #1d2633; display: inline-block; padding: 30px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }}
-                .badge {{ font-size: 24px; font-weight: bold; padding: 10px 20px; border-radius: 8px; margin: 15px 0; display: inline-block; }}
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; text-align: center; padding-top: 50px; background: #0f172a; color: #fff; }}
+                .card {{ background: #1e293b; display: inline-block; padding: 35px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.4); max-width: 450px; }}
+                .badge {{ font-size: 22px; font-weight: bold; padding: 12px 24px; border-radius: 10px; margin: 20px 0; display: inline-block; }}
                 .on {{ background: #10b981; color: white; }}
                 .off {{ background: #ef4444; color: white; }}
+                .time {{ color: #94a3b8; font-size: 15px; margin-top: 10px; }}
             </style>
         </head>
         <body>
             <div class="card">
-                <h2>🤖 Telegram Link Monitor Bot</h2>
-                <p>Target: <code>{config.get('TARGET_URL')}</code></p>
+                <h2>🤖 বায়ার লিংক মনিটর</h2>
                 <div class="badge {'on' if current_link_state else 'off'}">{status_text}</div>
-                <p>Status Detail: <strong>{last_status_message}</strong></p>
-                <p>Last Checked: {last_check_time or 'N/A'}</p>
-                <p style="color: #94a3b8; font-size: 13px;">Render 24/7 Healthcheck Active ✅</p>
+                <div class="time">সর্বশেষ চেক: <strong>{last_check_time or 'অপেক্ষমান'}</strong></div>
             </div>
         </body>
         </html>
@@ -178,16 +174,14 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(html.encode("utf-8"))
 
     def log_message(self, format, *args):
-        # Silence standard HTTP access logging to keep console clean
         return
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    print(f"🌐 [Web Server] হেলথ-চেক সার্ভার পোর্ট {port} এ চলছে...")
     server.serve_forever()
 
-# --- Telegram Command Polling (Handles /status, /ping, etc.) ---
+# --- ম্যানুয়াল কমান্ড হ্যান্ডলার (/status, /check) ---
 def telegram_command_listener():
     token = config.get("BOT_TOKEN", "").strip()
     if not token or token == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
@@ -216,38 +210,37 @@ def telegram_command_listener():
 
                     clean_text = text.lower().split('@')[0].strip()
 
-                    if clean_text in ["/status", "/check", "/link", "/now", "status", "check"]:
-                        # Perform an instant fresh check
-                        live_status, live_reason = check_link_status()
+                    # ম্যানুয়াল স্ট্যাটাস চেক
+                    if clean_text in ["/status", "/check", "/link", "status", "check"]:
+                        live_status = check_link_status()
                         current_link_state = live_status
-                        time_str = datetime.now().strftime("%I:%M:%S %p")
+                        time_str = get_bd_time_str(include_seconds=False)
 
                         if live_status is True:
                             reply = (
-                                f"🟢 <b>লিংক এখন চালু (ON) রয়েছে! 🔥🚀</b>\n"
+                                f"🟢 <b>লিংক চালু রয়েছে! 🔥🚀</b>\n"
                                 f"সবাই পুরো দমে কাজ করতে পারেন।\n\n"
                                 f"🔗 <b>লিংক:</b> {config.get('TARGET_URL')}\n"
-                                f"⏰ <b>সর্বশেষ চেক:</b> {time_str}"
+                                f"⏰ <b>সময়:</b> {time_str}"
                             )
                         else:
                             reply = (
-                                f"🔴 <b>লিংক এখন বন্ধ (OFF) রয়েছে! ⚠️😴</b>\n"
-                                f"📋 <b>কারণ:</b> {live_reason}\n"
-                                f"<i>(লিংক চালু হওয়া মাত্রই গ্রুপে অটোমেটিক মেসেজ আসবে)</i>\n\n"
-                                f"⏰ <b>সর্বশেষ চেক:</b> {time_str}"
+                                f"🔴 <b>আজকের মতো লিংক অফ! ⚠️😴</b>\n"
+                                f"আবার অন হলে গ্রুপে জানানো হবে।\n\n"
+                                f"⏰ <b>সময়:</b> {time_str}"
                             )
                         requests.post(send_url, json={"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}, timeout=5)
 
                     elif clean_text in ["/ping", "ping"]:
-                        requests.post(send_url, json={"chat_id": chat_id, "text": "🏓 Pong! বট পুরোপুরি সক্রিয় এবং প্রতি ১০ সেকেন্ড পর পর লিংক মনিটর করছে।"}, timeout=5)
+                        requests.post(send_url, json={"chat_id": chat_id, "text": "⚡ বট সক্রিয় আছে এবং লিংক মনিটর করছে।"}, timeout=5)
 
                     elif clean_text in ["/start", "/help", "help"]:
                         help_text = (
-                            "👋 <b>লিংক মনিটর বটের স্বাগতম!</b>\n\n"
-                            "এই বটটি প্রতি ১০ সেকেন্ড পরপর বায়ারের লিংক স্বয়ংক্রিয়ভাবে চেক করে এবং অন/অফ হলে গ্রুপে অ্যালার্ট দেয়।\n\n"
-                            "📌 <b>ম্যানুয়ালি চেক করার কমান্ড:</b>\n"
-                            "• <code>/status</code> বা <code>/check</code> - যে কোনো সময় লিংকের লাইভ অবস্থা জানতে\n"
-                            "• <code>/ping</code> - বট একটিভ আছে কিনা দেখতে"
+                            "👋 <b>বায়ার লিংক মনিটর বট</b>\n\n"
+                            "এই বটটি প্রতি ১০ সেকেন্ড পরপর বায়ারের লিংক স্বয়ংক্রিয়ভাবে পরীক্ষা করে এবং চালু বা বন্ধ হলে নোটিফিকেশন পাঠায়।\n\n"
+                            "📌 <b>কমান্ড:</b>\n"
+                            "• <code>/status</code> - লিংকের বর্তমান অবস্থা জানতে\n"
+                            "• <code>/ping</code> - বট সচল আছে কিনা দেখতে"
                         )
                         requests.post(send_url, json={"chat_id": chat_id, "text": help_text, "parse_mode": "HTML"}, timeout=5)
         except Exception:
@@ -260,64 +253,70 @@ def monitor_loop():
     interval = config.get("CHECK_INTERVAL", 10)
     target_url = config.get("TARGET_URL", "http://skysysx.net/e/boss")
 
-    # Messages requested by user
-    MSG_ON = (
-        f"🟢 <b>লিংক চালু রয়েছে! 🔥🚀 সবাই পুরো দমে কাজ করুন।</b>\n\n"
-        f"🔗 <b>লিংক:</b> {target_url}"
-    )
-    MSG_OFF = (
-        f"🔴 <b>আজকের মতো লিংক অফ! ⚠️😴 আবার অন হলে জানানো হবে।</b>"
-    )
+    # নোটিফিকেশন মেসেজ
+    def get_msg_on():
+        return (
+            f"🟢 <b>লিংক চালু রয়েছে! 🔥🚀 সবাই পুরো দমে কাজ করুন।</b>\n\n"
+            f"🔗 <b>লিংক:</b> {target_url}\n"
+            f"⏰ <b>সময়:</b> {get_bd_time_str(include_seconds=False)}"
+        )
+
+    def get_msg_off():
+        return (
+            f"🔴 <b>আজকের মতো লিংক অফ! ⚠️😴 আবার অন হলে জানানো হবে।</b>\n\n"
+            f"⏰ <b>সময়:</b> {get_bd_time_str(include_seconds=False)}"
+        )
 
     print("=" * 60)
     print("🚀 টেলিগ্রাম লিংক মনিটর বট চালু হয়েছে!")
     print(f"🎯 টার্গেট লিংক: {target_url}")
-    print(f"⏱️ চেক ব্যবধান: প্রতি {interval} সেকেন্ড")
+    print(f"⏱️ চেক ইন্টারভাল: প্রতি {interval} সেকেন্ড")
+    print(f"🇧🇩 বর্তমান বাংলাদেশ সময়: {get_bd_time_str()}")
     print("=" * 60)
 
-    # Initial check
-    status, reason = check_link_status()
-    current_link_state = status
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] প্রাথমিক স্ট্যাটাস: {'🟢 ON' if status else '🔴 OFF'} ({reason})")
+    # শুরুর প্রাথমিক চেক
+    initial_status = check_link_status()
+    current_link_state = initial_status
+    initial_text = "🟢 চালু" if initial_status else "🔴 বন্ধ"
+    print(f"[{get_bd_time_str()}] প্রাথমিক অবস্থা: {initial_text}")
 
     while True:
         try:
-            status, reason = check_link_status()
-            timestamp = datetime.now().strftime("%H:%M:%S")
+            status = check_link_status()
+            bd_now = get_bd_time_str()
 
             if status is not None:
-                # If status changed
+                # অবস্থা পরিবর্তিত হলে (বন্ধ থেকে চালু অথবা চালু থেকে বন্ধ)
                 if status != current_link_state:
                     if status is True:
-                        print(f"[{timestamp}] 🟢 পরিবর্তন সনাক্ত: OFF ➔ ON! অ্যালার্ট পাঠানো হচ্ছে...")
-                        send_telegram_message(MSG_ON)
+                        print(f"[{bd_now}] 🟢 লিংক চালু হয়েছে! গ্রুপে মেসেজ পাঠানো হচ্ছে...")
+                        send_telegram_message(get_msg_on())
                     else:
-                        print(f"[{timestamp}] 🔴 পরিবর্তন সনাক্ত: ON ➔ OFF! অ্যালার্ট পাঠানো হচ্ছে...")
-                        send_telegram_message(MSG_OFF)
+                        print(f"[{bd_now}] 🔴 লিংক বন্ধ হয়েছে! গ্রুপে মেসেজ পাঠানো হচ্ছে...")
+                        send_telegram_message(get_msg_off())
                     
                     current_link_state = status
                 else:
-                    # Print heartbeat to console every check
-                    stat_icon = "🟢 ON" if status else "🔴 OFF"
-                    print(f"[{timestamp}] লিংক চেক: {stat_icon} ({reason})")
+                    stat_icon = "🟢 চালু" if status else "🔴 বন্ধ"
+                    print(f"[{bd_now}] লিংক চেক: {stat_icon}")
             else:
-                print(f"[{timestamp}] ⚠️ সার্ভারের সাথে সংযোগ করা যাচ্ছে না ({reason})")
+                print(f"[{bd_now}] ⚠️ সার্ভার রেসপন্স করছে না")
 
         except Exception as e:
-            print(f"⚠️ মনিটরিং এরর: {e}")
+            print(f"[{get_bd_time_str()}] ⚠️ এরর: {e}")
 
         time.sleep(interval)
 
 def main():
-    # 1. Start Web Server in background thread (for Render / UptimeRobot)
+    # ১. ব্যাকগ্রাউন্ড ওয়েব সার্ভার (রেন্ডারের জন্য)
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    # 2. Start Telegram Command Listener in background thread
+    # ২. টেলিগ্রাম কমান্ড হ্যান্ডলার
     cmd_thread = threading.Thread(target=telegram_command_listener, daemon=True)
     cmd_thread.start()
 
-    # 3. Start Main Monitoring Loop in main thread
+    # ৩. মূল মনিটরিং লুপ
     monitor_loop()
 
 if __name__ == "__main__":
