@@ -214,28 +214,40 @@ def telegram_command_listener():
                     if not text or not chat_id:
                         continue
 
-                    if text.startswith("/status"):
-                        state_str = "🟢 <b>চালু (ON)</b>" if current_link_state else "🔴 <b>বন্ধ (OFF)</b>"
-                        reply = (
-                            f"📊 <b>লিংক স্ট্যাটাস রিপোর্ট</b>\n\n"
-                            f"বর্তমান অবস্থা: {state_str}\n"
-                            f"বিস্তারিত: {last_status_message}\n"
-                            f"সর্বশেষ চেক: {last_check_time}\n"
-                            f"লিংক: {config.get('TARGET_URL')}"
-                        )
+                    clean_text = text.lower().split('@')[0].strip()
+
+                    if clean_text in ["/status", "/check", "/link", "/now", "status", "check"]:
+                        # Perform an instant fresh check
+                        live_status, live_reason = check_link_status()
+                        current_link_state = live_status
+                        time_str = datetime.now().strftime("%I:%M:%S %p")
+
+                        if live_status is True:
+                            reply = (
+                                f"🟢 <b>লিংক এখন চালু (ON) রয়েছে! 🔥🚀</b>\n"
+                                f"সবাই পুরো দমে কাজ করতে পারেন।\n\n"
+                                f"🔗 <b>লিংক:</b> {config.get('TARGET_URL')}\n"
+                                f"⏰ <b>সর্বশেষ চেক:</b> {time_str}"
+                            )
+                        else:
+                            reply = (
+                                f"🔴 <b>লিংক এখন বন্ধ (OFF) রয়েছে! ⚠️😴</b>\n"
+                                f"📋 <b>কারণ:</b> {live_reason}\n"
+                                f"<i>(লিংক চালু হওয়া মাত্রই গ্রুপে অটোমেটিক মেসেজ আসবে)</i>\n\n"
+                                f"⏰ <b>সর্বশেষ চেক:</b> {time_str}"
+                            )
                         requests.post(send_url, json={"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}, timeout=5)
 
-                    elif text.startswith("/ping"):
-                        requests.post(send_url, json={"chat_id": chat_id, "text": "🏓 Pong! বট পুরোপুরি সক্রিয় এবং লিংক মনিটর করছে।"}, timeout=5)
+                    elif clean_text in ["/ping", "ping"]:
+                        requests.post(send_url, json={"chat_id": chat_id, "text": "🏓 Pong! বট পুরোপুরি সক্রিয় এবং প্রতি ১০ সেকেন্ড পর পর লিংক মনিটর করছে।"}, timeout=5)
 
-                    elif text.startswith("/start") or text.startswith("/help"):
+                    elif clean_text in ["/start", "/help", "help"]:
                         help_text = (
                             "👋 <b>লিংক মনিটর বটের স্বাগতম!</b>\n\n"
-                            "এই বটটি প্রতি ১০ সেকেন্ড পরপর বায়ারের লিংক মনিটর করে এবং লিংক অন/অফ হওয়ার সাথে সাথে নোটিফিকেশন পাঠায়।\n\n"
-                            "কমান্ডসমূহ:\n"
-                            "/status - বর্তমান লিংকের অবস্থা জানতে\n"
-                            "/ping - বট জীবিত আছে কিনা পরীক্ষা করতে\n"
-                            "/help - সাহায্য পেতে"
+                            "এই বটটি প্রতি ১০ সেকেন্ড পরপর বায়ারের লিংক স্বয়ংক্রিয়ভাবে চেক করে এবং অন/অফ হলে গ্রুপে অ্যালার্ট দেয়।\n\n"
+                            "📌 <b>ম্যানুয়ালি চেক করার কমান্ড:</b>\n"
+                            "• <code>/status</code> বা <code>/check</code> - যে কোনো সময় লিংকের লাইভ অবস্থা জানতে\n"
+                            "• <code>/ping</code> - বট একটিভ আছে কিনা দেখতে"
                         )
                         requests.post(send_url, json={"chat_id": chat_id, "text": help_text, "parse_mode": "HTML"}, timeout=5)
         except Exception:
