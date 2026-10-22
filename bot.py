@@ -33,7 +33,7 @@ CHATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "registere
 def load_config():
     default_config = {
         "BOT_TOKEN": os.getenv("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE"),
-        "CHAT_ID": os.getenv("CHAT_ID", "YOUR_TELEGRAM_GROUP_CHAT_ID_HERE"),
+        "CHAT_ID": os.getenv("CHAT_ID", "-1003560158316"),
         "CHECK_INTERVAL": int(os.getenv("CHECK_INTERVAL", "10")),
         "TARGET_URL": os.getenv("TARGET_URL", "http://skysysx.net/e/boss"),
         "API_URL": os.getenv("API_URL", "http://skysysx.net/api/info")
@@ -66,25 +66,37 @@ config = load_config()
 # নিবন্ধিত চ্যাট/গ্রুপ আইডি সংরক্ষণ ও লোড করার ব্যবস্থা
 registered_chats = set()
 
+def sanitize_chat_id(cid):
+    cid = str(cid).strip()
+    if cid.startswith("100") and len(cid) >= 12:
+        cid = "-" + cid
+    return cid
+
 def load_registered_chats():
     global registered_chats
-    # config-এর CHAT_ID যোগ করা
     cfg_chat = config.get("CHAT_ID", "").strip()
     if cfg_chat and cfg_chat != "YOUR_TELEGRAM_GROUP_CHAT_ID_HERE":
-        registered_chats.add(cfg_chat)
+        registered_chats.add(sanitize_chat_id(cfg_chat))
         
     if os.path.exists(CHATS_FILE):
         try:
             with open(CHATS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 for cid in data:
-                    registered_chats.add(str(cid))
+                    clean_id = sanitize_chat_id(cid)
+                    if clean_id:
+                        registered_chats.add(clean_id)
         except Exception:
             pass
+    # Remove any un-sanitized IDs if sanitized version exists
+    clean_set = set()
+    for c in registered_chats:
+        clean_set.add(sanitize_chat_id(c))
+    registered_chats = clean_set
 
 def save_registered_chat(chat_id):
     global registered_chats
-    chat_id_str = str(chat_id).strip()
+    chat_id_str = sanitize_chat_id(chat_id)
     if chat_id_str and chat_id_str not in registered_chats:
         registered_chats.add(chat_id_str)
         try:
@@ -325,6 +337,17 @@ def telegram_command_listener():
                             "এখন থেকে বায়ারের লিংক চালু বা বন্ধ হওয়া মাত্রই এই গ্রুপে স্বয়ংক্রিয় নোটিফিকেশন আসবে।"
                         )
                         requests.post(send_url, json={"chat_id": chat_id, "text": reply, "parse_mode": "HTML"}, timeout=5)
+                        
+                        # রেজিস্টার হওয়ার সাথে সাথে লিংক যদি অন থাকে, তৎক্ষণাৎ অ্যালার্ট দেওয়া
+                        live_status = check_link_status()
+                        if live_status is True:
+                            msg_on = (
+                                f"🟢 <b>লিংক চালু রয়েছে! 🔥🚀</b>\n"
+                                f"সবাই পুরো দমে কাজ করতে পারেন।\n\n"
+                                f"🔗 <b>লিংক:</b> {config.get('TARGET_URL')}\n"
+                                f"⏰ <b>সময়:</b> {get_bd_time_str(include_seconds=False)}"
+                            )
+                            requests.post(send_url, json={"chat_id": chat_id, "text": msg_on, "parse_mode": "HTML"}, timeout=5)
 
                     # ম্যানুয়াল স্ট্যাটাস চেক (/status, /check)
                     elif clean_text in ["/status", "/check", "/link", "status", "check"]:
@@ -371,29 +394,32 @@ def monitor_loop():
 
     def get_msg_on():
         return (
-            f"🟢 <b>লিংক চালু রয়েছে! 🔥🚀 সবাই পুরো দমে কাজ করুন।</b>\n\n"
+            f"🟢 <b>লিংক চালু রয়েছে! 🔥🚀</b>\n"
+            f"সবাই পুরো দমে কাজ করতে পারেন।\n\n"
             f"🔗 <b>লিংক:</b> {target_url}\n"
             f"⏰ <b>সময়:</b> {get_bd_time_str(include_seconds=False)}"
         )
 
     def get_msg_off():
         return (
-            f"🔴 <b>আজকের মতো লিংক অফ! ⚠️😴 আবার অন হলে জানানো হবে।</b>\n\n"
+            f"🔴 <b>আজকের মতো লিংক অফ! ⚠️😴</b>\n"
+            f"আবার অন হলে গ্রুপে জানানো হবে।\n\n"
             f"⏰ <b>সময়:</b> {get_bd_time_str(include_seconds=False)}"
         )
 
     add_log(f"🚀 মনিটরিং শুরু: প্রতি {interval} সেকেন্ড পরপর লিংক চেক হবে")
 
-    # প্রাথমিক চেক:
+    # প্রাথমিক অবস্থা ও বট চালু হওয়ামাত্রই গ্রুপে তাৎক্ষণিক মেসেজ পাঠানো
     initial_status = check_link_status()
-    current_link_state = initial_status
     initial_text = "🟢 চালু" if initial_status else "🔴 বন্ধ"
     add_log(f"প্রাথমিক অবস্থা: {initial_text}")
 
-    # যদি বট চালু হওয়ার সময় লিংক অলরেডি চালু থাকে, তবে গ্রুপে তাৎক্ষণিক বার্তা দেওয়া
-    if initial_status is True:
-        add_log("বট চালু হওয়ার সময় লিংক অন পাওয়া গেছে! গ্রুপে মেসেজ পাঠানো হচ্ছে...")
-        send_telegram_message(get_msg_on())
+    startup_msg = get_msg_on() if initial_status is True else get_msg_off()
+    add_log(f"বট চালু হয়েছে! গ্রুপে অটোমেটিক মেসেজ পাঠানো হচ্ছে...")
+    if send_telegram_message(startup_msg):
+        current_link_state = initial_status
+    else:
+        current_link_state = None  # পাঠানো না গেলে যাতে লুপে পুনরায় পাঠানোর চেষ্টা করে
 
     while True:
         try:
